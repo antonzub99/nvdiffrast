@@ -12,6 +12,7 @@ import numpy as np
 import os
 import torch
 import torch.utils.cpp_extension
+import torch.cuda.amp as amp
 
 #----------------------------------------------------------------------------
 # C++/Cuda plugin compiler/loader.
@@ -241,6 +242,7 @@ class RasterizeGLContext:
 
 class _rasterize_func(torch.autograd.Function):
     @staticmethod
+    @amp.custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, raster_ctx, pos, tri, resolution, ranges, grad_db, peeling_idx):
         if isinstance(raster_ctx, RasterizeGLContext):
             out, out_db = _get_plugin(gl=True).rasterize_fwd_gl(raster_ctx.cpp_wrapper, pos, tri, resolution, ranges, peeling_idx)
@@ -251,6 +253,7 @@ class _rasterize_func(torch.autograd.Function):
         return out, out_db
 
     @staticmethod
+    @amp.custom_bwd
     def backward(ctx, dy, ddb):
         pos, tri, out = ctx.saved_tensors
         if ctx.saved_grad_db:
@@ -386,6 +389,7 @@ class DepthPeeler:
 # Output pixel differentials for at least some attributes.
 class _interpolate_func_da(torch.autograd.Function):
     @staticmethod
+    @amp.custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, attr, rast, tri, rast_db, diff_attrs_all, diff_attrs_list):
         out, out_da = _get_plugin().interpolate_fwd_da(attr, rast, tri, rast_db, diff_attrs_all, diff_attrs_list)
         ctx.save_for_backward(attr, rast, tri, rast_db)
@@ -393,6 +397,7 @@ class _interpolate_func_da(torch.autograd.Function):
         return out, out_da
 
     @staticmethod
+    @amp.custom_bwd
     def backward(ctx, dy, dda):
         attr, rast, tri, rast_db = ctx.saved_tensors
         diff_attrs_all, diff_attrs_list = ctx.saved_misc
@@ -402,12 +407,14 @@ class _interpolate_func_da(torch.autograd.Function):
 # No pixel differential for any attribute.
 class _interpolate_func(torch.autograd.Function):
     @staticmethod
+    @amp.custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, attr, rast, tri):
         out, out_da = _get_plugin().interpolate_fwd(attr, rast, tri)
         ctx.save_for_backward(attr, rast, tri)
         return out, out_da
 
     @staticmethod
+    @amp.custom_bwd
     def backward(ctx, dy, _):
         attr, rast, tri = ctx.saved_tensors
         g_attr, g_rast = _get_plugin().interpolate_grad(attr, rast, tri, dy)
@@ -473,6 +480,7 @@ def interpolate(attr, rast, tri, rast_db=None, diff_attrs=None):
 # Linear-mipmap-linear and linear-mipmap-nearest: Mipmaps enabled.
 class _texture_func_mip(torch.autograd.Function):
     @staticmethod
+    @amp.custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, filter_mode, tex, uv, uv_da, mip_level_bias, mip_wrapper, filter_mode_enum, boundary_mode_enum, *mip_stack):
         empty = torch.tensor([])
         if uv_da is None:
@@ -487,6 +495,7 @@ class _texture_func_mip(torch.autograd.Function):
         return out
 
     @staticmethod
+    @amp.custom_bwd
     def backward(ctx, dy):
         tex, uv, uv_da, mip_level_bias, *mip_stack = ctx.saved_tensors
         filter_mode, mip_wrapper, filter_mode_enum, boundary_mode_enum = ctx.saved_misc
@@ -500,6 +509,7 @@ class _texture_func_mip(torch.autograd.Function):
 # Linear and nearest: Mipmaps disabled.
 class _texture_func(torch.autograd.Function):
     @staticmethod
+    @amp.custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, filter_mode, tex, uv, filter_mode_enum, boundary_mode_enum):
         out = _get_plugin().texture_fwd(tex, uv, filter_mode_enum, boundary_mode_enum)
         ctx.save_for_backward(tex, uv)
@@ -507,6 +517,7 @@ class _texture_func(torch.autograd.Function):
         return out
 
     @staticmethod
+    @amp.custom_bwd
     def backward(ctx, dy):
         tex, uv = ctx.saved_tensors
         filter_mode, filter_mode_enum, boundary_mode_enum = ctx.saved_misc
@@ -646,6 +657,7 @@ def texture_construct_mip(tex, max_mip_level=None, cube_mode=False):
 
 class _antialias_func(torch.autograd.Function):
     @staticmethod
+    @amp.custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, color, rast, pos, tri, topology_hash, pos_gradient_boost):
         out, work_buffer = _get_plugin().antialias_fwd(color, rast, pos, tri, topology_hash)
         ctx.save_for_backward(color, rast, pos, tri)
@@ -653,6 +665,7 @@ class _antialias_func(torch.autograd.Function):
         return out
 
     @staticmethod
+    @amp.custom_bwd
     def backward(ctx, dy):
         color, rast, pos, tri = ctx.saved_tensors
         pos_gradient_boost, work_buffer = ctx.saved_misc
